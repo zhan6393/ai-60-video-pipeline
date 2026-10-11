@@ -1,134 +1,122 @@
-# Log Anomaly Scout 🔍
+# AI 60-Second — Automated Short-Video Pipeline (Offline Demo)
 
-[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![No dependencies](https://img.shields.io/badge/core-zero--dependencies-lightgrey.svg)](scout.py)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Dependencies](https://img.shields.io/badge/deps-stdlib%20only-brightgreen)](requirements.txt)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-Find anomalous error-rate windows in application logs — fast, transparent, and
-dependency-free. Built from my experience in production support: most incident
-triage starts with "which service's error rate just moved, and what is it
-saying?"
+An end-to-end pipeline that turns a news topic into a 45–60 second vertical (9:16) short video:
+**topic brief → narration script → voiceover → visuals → ffmpeg assembly**.
 
-## What it does
+> **Demo replica.** This repo is an *offline, dependency-free re-implementation* of a real
+> production pipeline I built and operate daily ("AI 60秒"). It demonstrates the **orchestration
+> logic** — stage contracts, timing math, and graceful degradation — using placeholder audio
+> and images instead of paid LLM / TTS / image-generation APIs. See [Honest caveats](#honest-caveats).
 
-1. **`generate_logs.py`** synthesizes ~2,000 lines of application logs
-   (`timestamp level service message`) across 4 fictional services, with
-   **3 injected incident windows** (DB connection storm, upstream timeout
-   wave, circuit-breaker opening) plus light background noise. A fixed
-   random seed makes everything reproducible. The injected windows are saved
-   to `logs/ground_truth.json` for evaluation.
-2. **`scout.py`** detects the incidents:
-   - Buckets logs into **5-minute windows per service** and computes the
-     ERROR rate per bucket (buckets with < 5 lines are skipped to avoid
-     noisy tiny samples).
-   - Builds a **per-service baseline** and flags buckets above
-     `max(mean + 3σ, 10%)` with at least 3 errors.
-   - Merges consecutive flagged buckets into **events** reporting start/end
-     time, peak error rate, top raw error messages, and a "likely cause"
-     (most common message template after masking request ids).
-   - `--eval` scores window-level **precision / recall / F1** against
-     `ground_truth.json`; `--chart` renders per-service error-rate trends
-     with thresholds and shaded anomaly windows (needs matplotlib).
+## Pipeline
+
+```
+┌─────────┐   ┌──────────┐   ┌────────────┐   ┌──────────┐   ┌───────────┐
+│  brief  │──▶│  script  │──▶│ voiceover  │──▶│ visuals  │──▶│ assemble  │
+│topic    │   │hook + key│   │demo: wave  │   │demo: PIL  │   │demo:      │
+│JSON     │   │points →  │   │placeholder │   │1080x1920  │   │ffmpeg →   │
+│         │   │narration │   │tone (or    │   │keyword    │   │demo.mp4   │
+│         │   │+storyboard│  │edge-tts)   │   │cards      │   │           │
+└─────────┘   └──────────┘   └────────────┘   └──────────┘   └───────────┘
+                                                              │ no ffmpeg?
+                                                              ▼
+                                                     output/manifest.json
+                                                     (always produced)
+```
+
+Each stage prints a one-line status; `output/manifest.json` records every stage's inputs,
+outputs, and timings — it is the pipeline's contract and always produced, even when
+optional dependencies are missing.
 
 ## Quickstart
 
+Zero required dependencies (Python 3.10+ stdlib only):
+
 ```bash
-# 1. Generate synthetic logs + ground truth
-python generate_logs.py
+# see the example topics
+python pipeline.py --list-topics
 
-# 2. Run the detector
-python scout.py logs/app.log
+# run the full pipeline in offline demo mode
+python pipeline.py --topic topics/open-weights-model.json --demo
 
-# 3. Evaluate against the injected incidents
-python scout.py logs/app.log --eval
-
-# 4. (optional) error-rate trend chart -> charts/app-trend.png
-pip install matplotlib
-python scout.py logs/app.log --chart
+# real TTS voiceover (optional: pip install edge-tts)
+python pipeline.py --topic topics/ai-chip.json --tts edge
 ```
 
-## Sample output
+Optional extras:
 
-Real run of `python scout.py logs/app.log --eval`:
-
-```
-================================================================
-Log Anomaly Scout — report
-================================================================
-lines parsed : 2000 (skipped 0 malformed)
-services     : api-gateway, auth-svc, order-svc, payment-svc
-bucket size  : 5 min (min 5 lines/bucket)
-events found : 3
-
-  [api-gateway] baseline mean=0.050 std=0.121 threshold=0.412 over 62 buckets
-  [auth-svc] baseline mean=0.024 std=0.055 threshold=0.190 over 61 buckets
-  [order-svc] baseline mean=0.026 std=0.102 threshold=0.331 over 57 buckets
-  [payment-svc] baseline mean=0.031 std=0.113 threshold=0.369 over 63 buckets
-
---- Event 1: payment-svc  2026-10-01 01:10 -> 2026-10-01 01:20 ---
-peak error rate : 66.7%  (8 errors in window)
-likely cause    : Transaction rollback failed req_id=REQ-# reason=db-unavailable
-top error messages:
-  - Transaction rollback failed req_id=REQ-437524 reason=db-unavailable
-  - Connection refused: db-primary:5432 pool exhausted req_id=REQ-356939
-  - Transaction rollback failed req_id=REQ-640657 reason=db-unavailable
-
---- Event 2: api-gateway  2026-10-01 03:45 -> 2026-10-01 03:55 ---
-peak error rate : 62.5%  (10 errors in window)
-likely cause    : 502 Bad Gateway req_id=REQ-# upstream=orders
-top error messages:
-  - Upstream timeout after 5000ms req_id=REQ-062140 upstream=orders
-  ...
-
---- Event 3: order-svc  2026-10-01 05:00 -> 2026-10-01 05:10 ---
-peak error rate : 55.6%  (8 errors in window)
-likely cause    : Circuit breaker OPEN for inventory-client req_id=REQ-#
-top error messages:
-  - Circuit breaker OPEN for inventory-client req_id=REQ-892540
-  ...
-
-----------------------------------------------------------------
-Evaluation vs ground truth
-precision=1.00  recall=1.00  f1=1.00  (TP=3 FP=0 FN=0)
-  hit: db-connection-storm (coverage 67%)
-  hit: upstream-timeout-wave (coverage 56%)
-  hit: circuit-breaker-open (coverage 83%)
+```bash
+pip install -r requirements.txt   # edge-tts (real voice) + Pillow (visual cards)
 ```
 
-All three injected incidents are found, no false positives, on this seed.
+Behavior without them: voiceover still works (stdlib `wave` placeholder tone), visuals are
+skipped with a warning, and the mp4 step is skipped — `output/manifest.json` is still written.
 
-## Honest caveats
+## Example output
 
-- **Synthetic data.** The logs, services, hostnames, and incidents are
-  entirely fictional. Real log streams are noisier, bursty, and full of
-  edge cases this demo never sees.
-- **Simple statistics.** A per-service mean+3σ threshold catches big spikes
-  but has no notion of seasonality, deploy-correlated changes, or gradual
-  degradation. A production version would use a rolling/seasonal baseline
-  (e.g. compare against the same window last week) and adaptive thresholds.
-- **No root-cause analysis.** "Likely cause" is just the most frequent
-  masked message template — it surfaces *what the logs are saying*, not
-  *why the system broke*. Real triage still needs traces, deploy history,
-  and infra signals.
-- **Toy scale.** 2,000 lines fit in memory. A production pipeline would
-  stream batches and emit alerts, not print a report.
+`output/manifest.json` (from `--topic topics/open-weights-model.json --demo`):
+
+```json
+{
+  "project": "ai-60-video-pipeline (offline demo replica)",
+  "topic": "Astra-2B: A New Open-Weights Model (Example Topic)",
+  "mode": "demo",
+  "stages": {
+    "brief": { "topic_file": "topics/open-weights-model.json" },
+    "script": {
+      "file": "scripts/open-weights-model_script.txt",
+      "words": 108,
+      "estimated_seconds": 45.0,
+      "storyboard_beats": 5
+    },
+    "voiceover": { "file": "output/voiceover.wav", "engine": "demo-placeholder" },
+    "visuals": { "cards": ["output/card_00.png", "..."], "resolution": "1080x1920" },
+    "assemble": { "mp4": "output/demo.mp4", "ffmpeg_available": true }
+  },
+  "generated_at": "2026-10-10T...",
+  "note": "Demo replica: placeholder tone audio and keyword cards stand in for real TTS and AI-generated visuals."
+}
+```
+
+With ffmpeg installed you also get `output/demo.mp4` — a 1080×1920 video with the
+placeholder voiceover track; without it, the manifest is the final artifact.
 
 ## Project structure
 
 ```
-log-anomaly-scout/
-├── generate_logs.py   # synthetic log + ground truth generator (seeded)
-├── scout.py           # anomaly detector: bucket, baseline, flag, merge, eval
-├── requirements.txt   # optional: matplotlib (charting only)
-├── README.md
-├── LICENSE            # MIT
-├── .gitignore         # logs/, charts/, __pycache__/
-├── logs/              # generated at runtime (gitignored)
-│   ├── app.log
-│   └── ground_truth.json
-└── charts/            # generated by --chart (gitignored)
+ai-60-video-pipeline/
+├── pipeline.py            # the whole pipeline: brief → script → voiceover → visuals → assemble
+├── topics/                # example topic briefs (title, hook, key_points, cta)
+│   ├── open-weights-model.json
+│   ├── ai-chip.json
+│   └── robotics-fleet.json
+├── scripts/               # generated narration scripts (gitignored)
+├── output/                # generated audio / cards / demo.mp4 / manifest.json (gitignored)
+├── requirements.txt       # optional deps only (edge-tts, Pillow)
+├── LICENSE                # MIT
+└── .gitignore
 ```
 
-## Author
+## Honest caveats
 
-Yiming Zhang — [GitHub](https://github.com/zhan6393) · [LinkedIn](https://www.linkedin.com/in/yiming-zhang20000101)
+- **This is a demo replica, not the production system.** The real pipeline uses an LLM for
+  topic research and scriptwriting, a neural TTS service for voiceover, and an image-generation
+  API for visuals. This repo replaces those with a JSON topic file, a template script builder,
+  a stdlib-synthesized placeholder tone, and Pillow keyword cards — so it runs offline, for free.
+- **Example topics are fictional.** Names like "Astra-2B" and "Helios-A1" are invented for the
+  demo; any resemblance to real products is coincidental.
+- **The demo voiceover is a tone, not speech.** It exists only to carry correct timing into the
+  assembled mp4. Pass `--tts edge` (with `edge-tts` installed) for real speech.
+- **No credentials, no network calls, no personal data** anywhere in this repo.
+
+## Why this exists
+
+The production version of this pipeline runs on a daily schedule and produces a finished
+short video every day — briefing, production, and publish reminders all automated. This repo
+exists to show *how the orchestration works*: deterministic stage contracts, duration math
+that keeps every video in the 45–60s band, and degradation paths that never leave the
+pipeline in a broken half-state.
