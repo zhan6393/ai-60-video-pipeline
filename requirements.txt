@@ -1,3 +1,4 @@
-streamlit>=1.30
-pandas>=2.0
-matplotlib>=3.6
+# Core pipeline has ZERO required dependencies — Python 3.10+ stdlib only.
+# Everything below is optional and degrades gracefully when missing:
+edge-tts>=7.0      # optional: real TTS voiceover via `python pipeline.py --tts edge`
+Pillow>=10.0       # optional: placeholder visual cards (1080x1920) via PIL
